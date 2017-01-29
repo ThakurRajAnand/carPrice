@@ -1,1 +1,1 @@
-# Case Study using Car Data
+# Case study using car data
