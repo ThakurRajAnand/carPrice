@@ -2,9 +2,9 @@
 This repo contains the R code for exploring dataset related to Car given on https://archive.ics.uci.edu/ml/datasets/Automobile
 
 All the code is in R folder and can be run in following sequence  
-1 - dataExploration.R
-2 - createCrossValidation.R
-3 - modelTraining.R
+1 - dataExploration.R  
+2 - createCrossValidation.R  
+3 - modelTraining.R  
 
 utils.R contains useful function and libraries required by above 3 scripts. Please make sure all the libraries imported in utils.R are installed on the system. 
 
