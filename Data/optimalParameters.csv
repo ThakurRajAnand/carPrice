@@ -1,0 +1,8 @@
+parameter,values
+max.depth,15
+min_child_weight,1
+subsample,0.5
+lambda,1.97067264851252
+alpha,0.00820825056296957
+gamma,1
+colsample,0.9
