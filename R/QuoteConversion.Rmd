@@ -1,0 +1,1199 @@
+---
+title: "SAMs Quote Conversion"
+author: "Thakur Raj Anand"
+date: "28 April 2016"
+output: html_document
+---
+
+#TODO
+- linear.scale(data$credProb1[timeIndex%in%c(1:27)],0.2,0.8)
+- Fix Excel Charts
+- Fix Variable Names
+- Gains on Holdout for New Factor comparison
+- Plots for importance instead of table
+- Binomial Deviance
+
+
+#Load data
+```{r message=F, warning=F}
+setwd("//qe3//clients//innovation centre//02 Initiatives//04 SAMs//03 Code//")
+chartsPath <- "//qe3//clients//innovation centre//02 Initiatives//04 SAMs//04 Results//Charts///"
+source("//qe3//clients//innovation centre//02 Initiatives//04 SAMs//03 Code//utils.R")
+data <- readRDS('..//02 Data//Contents QC_ALL.RDS')
+data <- subset(data,combo=="BLD only")
+data <- data[sample(nrow(data)),]
+row.names(data) <- NULL
+data$quote_month <- as.numeric(substring(data$quote_month,1,4))*13+as.numeric(substring(data$quote_month,6,8))
+data$quote_qtr <- as.numeric(substring(data$quote_qtr,1,4))*13+as.numeric(substring(data$quote_qtr,6,6))
+data$EXCSR_b <- as.numeric(as.character(data$EXCSR_b))
+data$EXCSR_c <- as.numeric(as.character(data$EXCSR_c))
+data$QCRegion <- as.factor(data$QCRegion)
+data$response <- data$PolSale
+data$PolSale <- NULL
+unique_month <- data.frame(quote_month=sort(unique(data$quote_month)),timeIndex=1:37)
+data <- merge(data,unique_month,by="quote_month",all.x=TRUE)
+set.seed(1111)
+data <- data[sample(nrow(data)),]
+timeIndex <- data$timeIndex
+
+exclVars <- c("quote_year", "quote_qtr", "quote_month",
+              "RandPc","RandGrp","TimePartition","combo","LLP_Excess","LLP_tot_50","SPEC_FLAG",
+              ##features are biased to response
+              "Cstag","Previous_Claims", 
+              ##contents features - excl for data
+              "spe_risk","S_SI","SPE_tot_50", "RiskR_c","EXCSR_c","C_SI","contents_tot_50","lle_sum_cts","UNSPE_SI","llp_cvr","timeIndex")
+
+data <- data[,!names(data)%in%exclVars]
+
+data$is_Holdout <- 0
+data$is_Holdout[timeIndex%in%c(1:24)] <- 0
+data$is_Holdout[timeIndex%in%c(25:27)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout)
+
+data$weight <- 1
+data$weight[timeIndex%in%c(25:27)] <- 1
+
+varNames <- read_csv("//QE3//clients//Innovation Centre//02 Initiatives//04 SAMs//02 Data//Contents QC variables.csv")[,1:2]
+varIndex <- which(names(data)%in%varNames[,1])
+varNames <- na.omit(varNames)
+varNames[,2] <- str_trim(varNames[,2])
+varNames[,2] <- gsub(" ","_",varNames[,2])
+names(data)[names(data)%in%varNames[,1]] <- varNames[,2]
+
+
+#Define factors to be used for response and credibility models
+variables <- c("qtr_num_in_yr","mth_num_in_yr","day_num_in_mth","day_num_in_wk","hour_num_in_day","staff_member","PAP_indicator","Building_SI",
+"Quote_channel","Adj_flood_rank","Flood_rank","Adj_bushfire_rank","Bushfire_rank","Water_depth","Bush_zone","Campaign_disc",
+"Campaign_type","Campaign_desc","Landlord_cover","Coverage_type","Occupancy_type","House_type","Wall_type","Alarm","Door_locks",
+"Window_locks","Brand","Building_risk","Building_excess","Age_band","State","Base_premium","Landlord_cover_premium","Currently_insured",
+"QF1_Affluent_professionals","QF2_Wealthy_families","QF3_Multicultural","QF4_Retired","QF5_Blue_collar","QF6_Elderly_with_assets",
+"QF7_Young_unemployed","QF8_Young_families","QF9_Miners","QF10_Kiwis","QF11_Interstate_travellers","QF12_New_Australians",
+"QF13_Part_time_workers","QF14_Share_housing","C_Median_Age_Persons","C_Med_Mthly_Mtg","C_Med_Wkly_Rent","C_Med_Wkly_Per_Inc",
+"C_Med_Wkly_Fam_Inc","C_Med_Wkly_HH_Inc","C_Avg_PP_BedRoom","C_Avg_HH_Size","C_PC_Unemployment","C_PC_Labour_Part","C_PC_Emp_to_Pop",
+"Region","Landlord_cover_SI","Total_SI","discount_dl","discount_pc","is_Holdout")
+
+excl_cred_vars <- c("qtr_num_in_yr","mth_num_in_yr","discount_dl","discount_pc","Campaign_disc",
+                    "Campaign_type","Campaign_desc","Adj_flood_rank","Flood_rank","Adj_bushfire_rank","Bushfire_rank","Bush_zone","is_Holdout")
+
+variables1 <- variables[!variables %in% excl_cred_vars]
+
+dataDistribution <- data.frame(data.frame(table(timeIndex)), data.frame(tapply(data$response,timeIndex,mean))[,1])
+names(dataDistribution) <- c("Month","No. of Observations","Average Response")
+write.csv(dataDistribution,file=paste(chartsPath,"dataDistribution.csv",sep=""),row.names=FALSE)
+```
+
+
+#Iteration 1
+##24 Month model
+```{r message=F, warning=F}
+model <- gbm(  
+  formula = response~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(1:24),c(variables,"response")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+)
+
+importance <- summary.gbm1(model,cBars=10,las=1,cex.names=0.45,plot=TRUE)[1:10,]
+row.names(importance) <- NULL
+kable(importance[1:10,],digits=6,caption="Variable Importance",align="c")
+
+ntrees1 <- gbm.perf(model,method='test',plot.it = FALSE)
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(model,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response')
+}
+
+pred <- predict(model,data[timeIndex%in%c(1:24),variables],n.trees=ntrees1,type="response")
+data$response1 <- 0
+data$response1[timeIndex%in%c(1:24)] <- pred
+data$response1[timeIndex%in%c(25:27)] <- data$response[timeIndex%in%c(25:27)]
+#PvO(data$response[timeIndex%in%c(1:24)],pred,"Train PvO")
+colAUC(data.frame(pred),data$response[timeIndex%in%c(1:24)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(1:24)],pred)
+```
+
+
+
+
+```{r message=F, warning=F}
+model1 <- gbm(  
+  formula = response1~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(1:27),c(variables,"response1","is_Holdout")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+  , weights = data$weight[timeIndex%in%c(1:27)]
+)
+```
+
+
+##Diagnostics 
+```{r message=F, warning=F}
+ntrees1 <- gbm.perf(model1,plot.it=TRUE,method='test')
+n1 <- ntrees1
+importance <- summary.gbm1(model1,cBars=10,las=1,cex.names=0.45,plot=FALSE)
+row.names(importance) <- NULL
+importance1 <- importance
+imp1 <- importance
+write.csv(imp1,file=paste(chartsPath,"responseModelImp1.csv",sep=""),row.names=FALSE)
+
+kable(importance1[1:10,],digits=6,caption="Variable Importance",align="c")
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(model1,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response')
+  tempPD <- plot.gbm(model1,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance1[j,1]),"_PD1.csv",sep=""),row.names=FALSE)
+}
+
+interactions1 <- data.frame(rep('zz',10),0.0)
+names(interactions1) <- c('var','Hstat')
+interactions1$var <- as.character(interactions1$var)
+
+for (i in 1:10){
+  interactions1[i,1] <- as.character(importance1[i,1])
+  interactions1[i,2] <- 
+    interact.gbm(model1
+                 , data[timeIndex%in%c(1:27),c(variables,"response1","is_Holdout")]
+                 , i.var=c(as.character(importance1[i,1]),'is_Holdout')
+                 , n.trees=ntrees1)
+}
+
+interactions1 <- interactions1[order(-interactions1$Hstat),]
+interactions1 <- interactions1[interactions1$Hstat>0,]
+interactions1 <- interactions1[!(interactions1$var%in%c("is_Holdout")),]
+rownames(interactions1) <- NULL
+kable(interactions1,caption="Top Interactions",align="c")
+
+plot.gbm(model1,n.trees=ntrees1,i.var='is_Holdout',type='response')
+
+for (i in 1:nrow(interactions1)){
+  j <- (nrow(interactions1)+1)-i
+  plot.gbm(model1,n.trees=ntrees1,i.var=c(as.character(interactions1[j,1]),'is_Holdout'),type='response',main=interactions1[j,'var'])
+}
+
+data$p1 <- 0
+data$p1[timeIndex%in%c(1:27)] <- predict(model1,data[timeIndex%in%c(1:27),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- factor(0)
+data$p1_0 <- 0
+data$p1_0[timeIndex%in%c(1:27)] <- predict(model1,data[timeIndex%in%c(1:27),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- factor(1)
+data$p1_1 <- 0
+data$p1_1[timeIndex%in%c(1:27)] <- predict(model1,data[timeIndex%in%c(1:27),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- as.numeric(data$is_Holdout)
+data$is_Holdout[timeIndex%in%c(1:24)] <- 0
+data$is_Holdout[timeIndex%in%c(25:27)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout)
+val <- data$p1_1[timeIndex%in%c(1:27)] - data$p1_0[timeIndex%in%c(1:27)]
+hist(val,breaks=30,col =QCOLOR[1])
+
+val <- data.frame(val=round(val,2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"isHoldoutVal1.csv",sep=""),row.names=FALSE)
+```
+
+
+#Credibility weight model - trainFrame1 and testFrame1
+```{r message=F, warning=F}
+variableNames <- c()
+CramerV <- c()
+for(i in variables){
+  variableNames <- c(variableNames,i)
+  CramerV <- c(CramerV,CramersV(data[timeIndex%in%c(1:27),i],data[timeIndex%in%c(1:27),"is_Holdout"]))
+}
+CramersV_Table <- data.frame(variableNames,CramerV)
+CramersV_Table <- CramersV_Table[order(-CramerV),][1:10,]
+rownames(CramersV_Table) <- NULL
+kable(CramersV_Table,caption = "CramersV Table",align="c")
+write.csv(CramersV_Table,file=paste(chartsPath,"CramersV_Table1.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F}  
+data$is_Holdout1 <- as.numeric(as.character(data$is_Holdout))
+modelCred1 <- gbm(  
+  formula = is_Holdout1~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(1:27),c(variables1,"is_Holdout1")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+)
+
+importance <- summary.gbm1(modelCred1,cBars=10,las=1,cex.names=0.45,plot=TRUE)
+row.names(importance) <- NULL
+kable(importance[1:10,],digits=6,caption="Variable Importance",align="c")
+ntrees1 <- gbm.perf(modelCred1,plot.it=TRUE,method='test')
+write.csv(importance,file=paste(chartsPath,"credModelImp1.csv",sep=""),row.names=FALSE)
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(modelCred1,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response')
+  tempPD <- plot.gbm(modelCred1,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance[j,1]),"_PD_Cred1.csv",sep=""),row.names=FALSE)
+}
+
+data$credProb1 <- 0
+data$credProb1[timeIndex%in%c(1:27)] <- predict(modelCred1
+                                                   ,data[timeIndex%in%c(1:27)
+                                                   ,c(variables1)]
+                                                   ,n.trees=ntrees1
+                                                   ,type="response")
+
+base_wt <- 0.4
+data$credWt1 <- 0
+data$credWt1[timeIndex%in%c(1:27)] <- linear.scale(data$credProb1[timeIndex%in%c(1:27)],0.2,0.8)
+
+data$p1_hat[timeIndex%in%c(1:27)] <- data$p1_0[timeIndex%in%c(1:27)]*(1-data$credWt1[timeIndex%in%c(1:27)]) +
+                                         data$p1_1[timeIndex%in%c(1:27)]*(data$credWt1[timeIndex%in%c(1:27)])
+
+
+hist(data$credProb1[timeIndex%in%c(1:27)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credProb1[timeIndex%in%c(1:27)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"totalRawProb1.csv",sep=""),row.names=FALSE)
+
+
+hist(data$credProb1[timeIndex%in%c(1:24)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credProb1[timeIndex%in%c(1:24)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"trainRawProb1.csv",sep=""),row.names=FALSE)
+
+hist(data$credProb1[timeIndex%in%c(25:27)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credProb1[timeIndex%in%c(25:27)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"holdoutRawProb1.csv",sep=""),row.names=FALSE)
+
+
+hist(data$credWt1[timeIndex%in%c(1:27)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credWt1[timeIndex%in%c(1:27)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"totalRescaledCred1.csv",sep=""),row.names=FALSE)
+
+hist(data$credWt1[timeIndex%in%c(1:24)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credWt1[timeIndex%in%c(1:24)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"trainRescaledCred1.csv",sep=""),row.names=FALSE)
+
+hist(data$credWt1[timeIndex%in%c(25:27)],col =QCOLOR[1])
+val <- data.frame(val=round(data$credWt1[timeIndex%in%c(25:27)],2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"holdoutRescaledCred1.csv",sep=""),row.names=FALSE)
+
+### GAINS - BASE SET ###
+Gains(data$response1[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)]
+      ,title='Gains Curve - Iter1 - Train',colour='blue', newplot=1, ltype=2)
+Gains(data$response1[timeIndex%in%c(1:24)],data$p1_1[timeIndex%in%c(1:24)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response1[timeIndex%in%c(1:24)],data$p1_0[timeIndex%in%c(1:24)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+
+
+### GAINS - HOLDOUT ###
+Gains(data$response1[timeIndex%in%c(25:27)],data$p1_hat[timeIndex%in%c(25:27)]
+      ,title='Gains Curve - Iter1 - Holdout',colour='blue', newplot=1, ltype=2)
+Gains(data$response1[timeIndex%in%c(25:27)],data$p1_1[timeIndex%in%c(25:27)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response1[timeIndex%in%c(25:27)],data$p1_0[timeIndex%in%c(25:27)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+stackPrediction <- data.frame(p1_hat = data$p1_hat[timeIndex%in%c(25:27)],
+                              p1_1 = data$p1_1[timeIndex%in%c(25:27)],
+                              p1_0 = data$p1_0[timeIndex%in%c(25:27)])
+gainsDataSimulation1 <- generateGainsData(data$response1[timeIndex%in%c(25:27)],stackPrediction)
+gainsPlot(gainsDataSimulation1,"Gains Chart Holdout Iteration 1")
+write.csv(gainsDataSimulation1,file=paste(chartsPath,"gainsDataSimulation1.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+PvO11(data$response[timeIndex%in%c(1:24)],data$p1[timeIndex%in%c(1:24)],"PvO Train")
+PvO11(data$response[timeIndex%in%c(25:27)],data$p1[timeIndex%in%c(25:27)],"PvO Test")
+PvO11(data$response[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)],"PvO Train + credWt")
+PvO11(data$response[timeIndex%in%c(25:27)],data$p1_hat[timeIndex%in%c(25:27)],"PvO Test + credWt")
+PvO11(data$response1[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)],"PvO Train + credWt + newResponse")
+
+CappedBinomialDeviance(data$response[timeIndex%in%c(1:24)],data$p1[timeIndex%in%c(1:24)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(25:27)],data$p1[timeIndex%in%c(25:27)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(25:27)],data$p1_hat[timeIndex%in%c(25:27)])
+CappedBinomialDeviance(data$response1[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)])
+
+colAUC(data.frame(data$p1[timeIndex%in%c(1:24)]),data$response[timeIndex%in%c(1:24)])
+colAUC(data.frame(data$p1[timeIndex%in%c(25:27)]),data$response[timeIndex%in%c(25:27)])
+colAUC(data.frame(data$p1_hat[timeIndex%in%c(1:24)]),data$response[timeIndex%in%c(1:24)])
+colAUC(data.frame(data$p1_hat[timeIndex%in%c(25:27)]),data$response[timeIndex%in%c(25:27)])
+
+trainPvO1 <- generatePvOData(data$response[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)])
+testPvO1 <- generatePvOData(data$response[timeIndex%in%c(25:27)],data$p1_hat[timeIndex%in%c(25:27)])
+trainPvO1New <- generatePvOData(data$response1[timeIndex%in%c(1:24)],data$p1_hat[timeIndex%in%c(1:24)])
+
+write.csv(trainPvO1,file=paste(chartsPath,"trainPvO1.csv",sep=""),row.names=FALSE)
+write.csv(testPvO1,file=paste(chartsPath,"testPvO1.csv",sep=""),row.names=FALSE)
+write.csv(trainPvO1New,file=paste(chartsPath,"trainPvO1New.csv",sep=""),row.names=FALSE)
+```
+
+
+#Iteration 2
+```{r message=F, warning=F}
+data$response2 <- 0
+data$response2[timeIndex%in%c(4:27)] <- data$p1_hat[timeIndex%in%c(4:27)]
+data$response2[timeIndex%in%c(28:30)] <- data$response[timeIndex%in%c(28:30)]
+
+data$is_Holdout[timeIndex%in%c(4:27)] <- 0
+data$is_Holdout[timeIndex%in%c(28:30)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout) 
+
+data$weight <- 1
+data$weight[timeIndex%in%c(28:30)] <- 2
+
+model2 <- gbm(  
+  formula = response2~.
+  , distribution = 'bernoulli'
+  , data = data[timeIndex%in%c(4:30),c(variables,"response2","is_Holdout")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+  , weights = data$weight[timeIndex%in%c(4:30)]
+)
+```
+
+
+##Diagnostics 
+```{r message=F, warning=F}
+ntrees1 <- gbm.perf(model2,plot.it=TRUE,method='test')
+n2 <- ntrees1
+importance <- summary.gbm1(model2,cBars=10,las=1,cex.names=0.45,plot=FALSE)
+row.names(importance) <- NULL
+importance1 <- importance
+imp2 <- importance
+write.csv(imp2,file=paste(chartsPath,"responseModelImp2.csv",sep=""),row.names=FALSE)
+kable(importance1[1:10,],digits=6,caption="Variable Importance",align="c")
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(model2,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response')
+  tempPD <- plot.gbm(model2,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance1[j,1]),"_PD2.csv",sep=""),row.names=FALSE)
+}
+
+interactions2 <- data.frame(rep('zz',10),0.0)
+names(interactions2) <- c('var','Hstat')
+interactions2$var <- as.character(interactions2$var)
+
+for (i in 1:10){
+  
+  interactions2[i,1] <- as.character(importance1[i,1])
+  
+  interactions2[i,2] <- 
+    interact.gbm(model2
+                 , data[timeIndex%in%c(4:30),c(variables,"response2","is_Holdout")]
+                 , i.var=c(as.character(importance1[i,1]),'is_Holdout')
+                 , n.trees=ntrees1)
+}
+
+interactions2 <- interactions2[order(-interactions2$Hstat),]
+interactions2 <- interactions2[interactions2$Hstat>0,]
+interactions2 <- interactions2[!(interactions2$var%in%c("is_Holdout")),]
+rownames(interactions1) <- NULL
+kable(interactions1,caption="Top Interactions",align="c")
+
+plot.gbm(model2,n.trees=ntrees1,i.var='is_Holdout',type='response')
+
+for (i in 1:nrow(interactions2)){
+  j <- (nrow(interactions2)+1)-i
+  plot.gbm(model2,n.trees=ntrees1,i.var=c(as.character(interactions2[j,1]),'is_Holdout'),type='response',main=interactions2[j,'var'])
+}
+
+data$p2 <- 0
+data$p2[timeIndex%in%c(4:30)] <- predict(model2,data[timeIndex%in%c(4:30),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+
+data$is_Holdout <- factor(0)
+data$p2_0 <- 0
+data$p2_0[timeIndex%in%c(4:30)] <- predict(model2,data[timeIndex%in%c(4:30),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- factor(1)
+data$p2_1 <- 0
+data$p2_1[timeIndex%in%c(4:30)] <- predict(model2,data[timeIndex%in%c(4:30),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- as.numeric(data$is_Holdout)
+data$is_Holdout[timeIndex%in%c(4:27)] <- 0
+data$is_Holdout[timeIndex%in%c(28:30)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout)
+val <- data$p1_1[timeIndex%in%c(4:30)] - data$p1_0[timeIndex%in%c(4:30)]
+hist(val,breaks=30,col =QCOLOR[1])
+
+val <- data.frame(val=round(val,2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"isHoldoutVal2.csv",sep=""),row.names=FALSE)
+```
+
+
+#Credibility weight model - trainFrame2 and testFrame2
+```{r message=F, warning=F}
+variableNames <- c()
+CramerV <- c()
+for(i in variables){
+  variableNames <- c(variableNames,i)
+  CramerV <- c(CramerV,CramersV(data[timeIndex%in%c(4:30),i],data[timeIndex%in%c(4:30),"is_Holdout"]))
+}
+CramersV_Table <- data.frame(variableNames,CramerV)
+CramersV_Table <- CramersV_Table[order(-CramerV),][1:10,]
+rownames(CramersV_Table) <- NULL
+kable(CramersV_Table,caption = "CramersV Table",align="c")
+write.csv(CramersV_Table,file=paste(chartsPath,"CramersV_Table2.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F}
+data$is_Holdout1 <- as.numeric(as.character(data$is_Holdout))
+modelCred2 <- gbm(  
+  formula = is_Holdout1~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(4:30),c(variables1,"is_Holdout1")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+)
+
+importance <- summary.gbm1(modelCred2,cBars=10,las=1,cex.names=0.45,plot=TRUE)
+row.names(importance) <- NULL
+kable(importance[1:10,],digits=6)
+ntrees1 <- gbm.perf(modelCred2,plot.it=TRUE,method='test')
+write.csv(importance,file=paste(chartsPath,"credModelImp2.csv",sep=""),row.names=FALSE)
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(modelCred2,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response')
+  tempPD <- plot.gbm(modelCred2,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance[j,1]),"_PD_Cred2.csv",sep=""),row.names=FALSE)
+}
+
+data$credProb2 <- 0
+data$credProb2[timeIndex%in%c(4:30)] <- predict(modelCred2
+                                                    ,data[timeIndex%in%c(4:30)
+                                                              ,c(variables1)]
+                                                    ,n.trees=ntrees1
+                                                    ,type="response")
+
+base_wt <- 0.4
+data$credWt2 <- 0
+data$credWt2[timeIndex%in%c(4:30)] <- linear.scale(data$credProb2[timeIndex%in%c(4:30)],0.2,0.8)
+
+
+data$p2_hat[timeIndex%in%c(4:30)] <- data$p2_0[timeIndex%in%c(4:30)]*(1-data$credWt2[timeIndex%in%c(4:30)]) +
+  data$p2_1[timeIndex%in%c(4:30)]*(data$credWt2[timeIndex%in%c(4:30)])
+
+
+hist(data$credProb2[timeIndex%in%c(4:30)],col =QCOLOR[1])
+hist(data$credProb2[timeIndex%in%c(4:27)],col =QCOLOR[1])
+hist(data$credProb2[timeIndex%in%c(28:30)],col =QCOLOR[1])
+
+hist(data$credWt2[timeIndex%in%c(4:30)],col =QCOLOR[1])
+hist(data$credWt2[timeIndex%in%c(4:27)],col =QCOLOR[1])
+hist(data$credWt2[timeIndex%in%c(28:30)],col =QCOLOR[1])
+
+### GAINS - BASE SET ###
+Gains(data$response2[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)]
+      ,title='Gains Curve - Iter2 - Train',colour='blue', newplot=1, ltype=2)
+Gains(data$response2[timeIndex%in%c(4:27)],data$p2_1[timeIndex%in%c(4:27)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response2[timeIndex%in%c(4:27)],data$p2_0[timeIndex%in%c(4:27)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+
+### GAINS - HOLDOUT ###
+Gains(data$response2[timeIndex%in%c(28:30)],data$p2_hat[timeIndex%in%c(28:30)]
+      ,title='Gains Curve - Iter2 - Holdout',colour='blue', newplot=1, ltype=2)
+Gains(data$response2[timeIndex%in%c(28:30)],data$p2_1[timeIndex%in%c(28:30)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response2[timeIndex%in%c(28:30)],data$p2_0[timeIndex%in%c(28:30)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+```
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+stackPrediction <- data.frame(p2_hat = data$p2_hat[timeIndex%in%c(28:30)],
+                              p2_1 = data$p2_1[timeIndex%in%c(28:30)],
+                              p2_0 = data$p2_0[timeIndex%in%c(28:30)])
+gainsDataSimulation2 <- generateGainsData(data$response2[timeIndex%in%c(28:30)],stackPrediction)
+gainsPlot(gainsDataSimulation2,"Gains Chart Holdout Iteration 2")
+write.csv(gainsDataSimulation2,file=paste(chartsPath,"gainsDataSimulation2.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+PvO11(data$response[timeIndex%in%c(4:27)],data$p2[timeIndex%in%c(4:27)],"PvO Train")
+PvO11(data$response[timeIndex%in%c(28:30)],data$p2[timeIndex%in%c(28:30)],"PvO Test")
+PvO11(data$response[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)],"PvO Train + credWt")
+PvO11(data$response[timeIndex%in%c(28:30)],data$p2_hat[timeIndex%in%c(28:30)],"PvO Test + credWt")
+PvO11(data$response2[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)],"PvO Train + credWt + newResponse")
+
+
+CappedBinomialDeviance(data$response[timeIndex%in%c(4:27)],data$p2[timeIndex%in%c(4:27)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(28:30)],data$p2[timeIndex%in%c(28:30)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(28:30)],data$p2_hat[timeIndex%in%c(28:30)])
+CappedBinomialDeviance(data$response2[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)])
+
+
+
+colAUC(data.frame(data$p2[timeIndex%in%c(4:27)]),data$response[timeIndex%in%c(4:27)])
+colAUC(data.frame(data$p2[timeIndex%in%c(28:30)]),data$response[timeIndex%in%c(28:30)])
+colAUC(data.frame(data$p2_hat[timeIndex%in%c(4:27)]),data$response[timeIndex%in%c(4:27)])
+colAUC(data.frame(data$p2_hat[timeIndex%in%c(28:30)]),data$response[timeIndex%in%c(28:30)])
+
+
+trainPvO2 <- generatePvOData(data$response[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)])
+testPvO2 <- generatePvOData(data$response[timeIndex%in%c(28:30)],data$p2_hat[timeIndex%in%c(28:30)])
+trainPvO2New <- generatePvOData(data$response2[timeIndex%in%c(4:27)],data$p2_hat[timeIndex%in%c(4:27)])
+
+write.csv(trainPvO2,file=paste(chartsPath,"trainPvO2.csv",sep=""),row.names=FALSE)
+write.csv(testPvO2,file=paste(chartsPath,"testPvO2.csv",sep=""),row.names=FALSE)
+write.csv(trainPvO2New,file=paste(chartsPath,"trainPvO2New.csv",sep=""),row.names=FALSE)
+```
+
+
+#Iteration 3
+```{r message=F, warning=F}
+data$response3 <- 0
+data$response3[timeIndex%in%c(7:30)] <- data$p2_hat[timeIndex%in%c(7:30)]
+data$response3[timeIndex%in%c(31:33)] <- data$response[timeIndex%in%c(31:33)]
+
+data$is_Holdout[timeIndex%in%c(7:30)] <- 0
+data$is_Holdout[timeIndex%in%c(31:33)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout) 
+
+data$weight <- 1
+data$weight[timeIndex%in%c(31:33)] <- 2
+
+model3 <- gbm(  
+  formula = response3~.
+  , distribution= 'bernoulli'
+  , data = data[timeIndex%in%c(7:33),c(variables,"response3","is_Holdout")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+  , weights = data$weight[timeIndex%in%c(7:33)]
+)
+```
+
+
+##Diagnostics 
+```{r message=F, warning=F}
+ntrees1 <- gbm.perf(model3,plot.it=TRUE,method='test')
+n3 <- ntrees1
+importance <- summary.gbm1(model3,cBars=10,las=1,cex.names=0.45,plot=FALSE)
+row.names(importance) <- NULL
+importance1 <- importance
+imp3 <- importance
+write.csv(imp3,file=paste(chartsPath,"responseModelImp3.csv",sep=""),row.names=FALSE)
+kable(importance1[1:10,],digits=6,caption="Variable Importance",align="c")
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(model3,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response')
+  tempPD <- plot.gbm(model3,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance1[j,1]),"_PD3.csv",sep=""),row.names=FALSE)
+}
+
+interactions3 <- data.frame(rep('zz',10),0.0)
+names(interactions3) <- c('var','Hstat')
+interactions3$var <- as.character(interactions3$var)
+
+for (i in 1:10){
+  interactions3[i,1] <- as.character(importance1[i,1])
+  interactions3[i,2] <- 
+    interact.gbm(model3
+                 , data[timeIndex%in%c(7:33),c(variables,"response3","is_Holdout")]
+                 , i.var=c(as.character(importance1[i,1]),'is_Holdout')
+                 , n.trees=ntrees1)
+}
+
+interactions3 <- interactions3[order(-interactions3$Hstat),]
+interactions3 <- interactions3[interactions3$Hstat>0,]
+interactions3 <- interactions3[!(interactions3$var%in%c("is_Holdout")),]
+rownames(interactions1) <- NULL
+kable(interactions1,caption="Top Interactions",align="c")
+
+plot.gbm(model3,n.trees=ntrees1,i.var='is_Holdout',type='response')
+
+for (i in 1:nrow(interactions3)){
+  j <- (nrow(interactions3)+1)-i
+  plot.gbm(model3,n.trees=ntrees1,i.var=c(as.character(interactions3[j,1]),'is_Holdout'),type='response',main=interactions3[j,'var'])
+}
+
+data$p3 <- 0
+data$p3[timeIndex%in%c(7:33)] <- predict(model3,data[timeIndex%in%c(7:33),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+
+data$is_Holdout <- factor(0)
+data$p3_0 <- 0
+data$p3_0[timeIndex%in%c(7:33)] <- predict(model3,data[timeIndex%in%c(7:33),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- factor(1)
+data$p3_1 <- 0
+data$p3_1[timeIndex%in%c(7:33)] <- predict(model3,data[timeIndex%in%c(7:33),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- as.numeric(data$is_Holdout)
+data$is_Holdout[timeIndex%in%c(7:30)] <- 0
+data$is_Holdout[timeIndex%in%c(31:33)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout)
+
+val <- data$p1_1[timeIndex%in%c(7:33)] - data$p1_0[timeIndex%in%c(7:33)]
+hist(val,breaks=30,col =QCOLOR[1])
+
+val <- data.frame(val=round(val,2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"isHoldoutVal3.csv",sep=""),row.names=FALSE)
+```
+
+
+
+#Credibility weight model - trainFrame3 and testFrame3
+```{r message=F, warning=F}
+variableNames <- c()
+CramerV <- c()
+for(i in variables){
+  variableNames <- c(variableNames,i)
+  CramerV <- c(CramerV,CramersV(data[timeIndex%in%c(7:33),i],data[timeIndex%in%c(7:33),"is_Holdout"]))
+}
+CramersV_Table <- data.frame(variableNames,CramerV)
+CramersV_Table <- CramersV_Table[order(-CramerV),][1:10,]
+rownames(CramersV_Table) <- NULL
+kable(CramersV_Table,caption = "CramersV Table",align="c")
+write.csv(CramersV_Table,file=paste(chartsPath,"CramersV_Table3.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F}
+data$is_Holdout1 <- as.numeric(as.character(data$is_Holdout))
+modelCred3 <- gbm(  
+  formula = is_Holdout1~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(7:33),c(variables1,"is_Holdout1")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+)
+
+importance <- summary.gbm1(modelCred3,cBars=10,las=1,cex.names=0.45,plot=TRUE)
+row.names(importance) <- NULL
+kable(importance[1:10,],digits=6,caption="Variable Importance",align="c")
+ntrees1 <- gbm.perf(modelCred3,plot.it=TRUE,method='test')
+write.csv(importance,file=paste(chartsPath,"credModelImp3.csv",sep=""),row.names=FALSE)
+
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(modelCred3,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response')
+  tempPD <- plot.gbm(modelCred3,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance[j,1]),"_PD_Cred3.csv",sep=""),row.names=FALSE)
+}
+
+data$credProb3 <- 0
+data$credProb3[timeIndex%in%c(7:33)] <- predict(modelCred3
+                                                    ,data[timeIndex%in%c(7:33)
+                                                              ,c(variables1)]
+                                                    ,n.trees=ntrees1
+                                                    ,type="response")
+
+base_wt <- 0.4
+data$credWt3 <- 0
+data$credWt3[timeIndex%in%c(7:33)] <- linear.scale(data$credProb3[timeIndex%in%c(7:33)],0.2,0.8)
+
+data$p3_hat[timeIndex%in%c(7:33)] <- data$p3_0[timeIndex%in%c(7:33)]*(1-data$credWt3[timeIndex%in%c(7:33)]) +
+  data$p3_1[timeIndex%in%c(7:33)]*(data$credWt3[timeIndex%in%c(7:33)])
+
+
+hist(data$credProb3[timeIndex%in%c(7:33)],col =QCOLOR[1])
+hist(data$credProb3[timeIndex%in%c(7:30)],col =QCOLOR[1])
+hist(data$credProb3[timeIndex%in%c(31:33)],col =QCOLOR[1])
+
+hist(data$credWt3[timeIndex%in%c(7:33)],col =QCOLOR[1])
+hist(data$credWt3[timeIndex%in%c(7:30)],col =QCOLOR[1])
+hist(data$credWt3[timeIndex%in%c(31:33)],col =QCOLOR[1])
+
+### GAINS - BASE SET ###
+Gains(data$response3[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)]
+      ,title='Gains Curve - Iter3 - Train',colour='blue', newplot=1, ltype=2)
+Gains(data$response3[timeIndex%in%c(7:30)],data$p3_1[timeIndex%in%c(7:30)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response3[timeIndex%in%c(7:30)],data$p3_0[timeIndex%in%c(7:30)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+
+### GAINS - HOLDOUT ###
+Gains(data$response3[timeIndex%in%c(31:33)],data$p3_hat[timeIndex%in%c(31:33)]
+      ,title='Gains Curve - Iter3 - Holdout',colour='blue', newplot=1, ltype=2)
+Gains(data$response3[timeIndex%in%c(31:33)],data$p3_1[timeIndex%in%c(31:33)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response3[timeIndex%in%c(31:33)],data$p3_0[timeIndex%in%c(31:33)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+stackPrediction <- data.frame(p3_hat = data$p3_hat[timeIndex%in%c(31:33)],
+                              p3_1 = data$p3_1[timeIndex%in%c(31:33)],
+                              p3_0 = data$p3_0[timeIndex%in%c(31:33)])
+gainsDataSimulation3 <- generateGainsData(data$response3[timeIndex%in%c(31:33)],stackPrediction)
+gainsPlot(gainsDataSimulation3,"Gains Chart Holdout Iteration 3")
+write.csv(gainsDataSimulation3,file=paste(chartsPath,"gainsDataSimulation3.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+PvO11(data$response[timeIndex%in%c(7:30)],data$p3[timeIndex%in%c(7:30)],"PvO Train")
+PvO11(data$response[timeIndex%in%c(31:33)],data$p3[timeIndex%in%c(31:33)],"PvO Test")
+PvO11(data$response[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)],"PvO Train + credWt")
+PvO11(data$response[timeIndex%in%c(31:33)],data$p3_hat[timeIndex%in%c(31:33)],"PvO Test + credWt")
+PvO11(data$response3[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)],"PvO Train + credWt + newResponse")
+
+
+CappedBinomialDeviance(data$response[timeIndex%in%c(7:30)],data$p3[timeIndex%in%c(7:30)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(31:33)],data$p3[timeIndex%in%c(31:33)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(31:33)],data$p3_hat[timeIndex%in%c(31:33)])
+CappedBinomialDeviance(data$response3[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)])
+
+
+trainPvO3 <- generatePvOData(data$response[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)])
+testPvO3 <- generatePvOData(data$response[timeIndex%in%c(31:33)],data$p3_hat[timeIndex%in%c(31:33)])
+trainPvO3New <- generatePvOData(data$response3[timeIndex%in%c(7:30)],data$p3_hat[timeIndex%in%c(7:30)])
+
+write.csv(trainPvO3,file=paste(chartsPath,"trainPvO3.csv",sep=""),row.names=FALSE)
+write.csv(testPvO3,file=paste(chartsPath,"testPvO3.csv",sep=""),row.names=FALSE)
+write.csv(trainPvO3New,file=paste(chartsPath,"trainPvO3New.csv",sep=""),row.names=FALSE)
+```
+
+
+#Iteration 4
+```{r message=F, warning=F}
+data$response4 <- 0
+data$response4[timeIndex%in%c(10:33)] <- data$p3_hat[timeIndex%in%c(10:33)]
+data$response4[timeIndex%in%c(34:36)] <- data$response[timeIndex%in%c(34:36)]
+
+data$is_Holdout[timeIndex%in%c(10:33)] <- 0
+data$is_Holdout[timeIndex%in%c(34:36)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout) 
+
+data$weight <- 1
+data$weight[timeIndex%in%c(34:36)] <- 2
+
+model4 <- gbm(  
+  formula = response4~.
+  , distribution = 'bernoulli'
+  , data = data[timeIndex%in%c(10:36),c(variables,"response4","is_Holdout")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+  , weights = data$weight[timeIndex%in%c(10:36)]
+)
+```
+
+
+
+##Diagnostics 
+```{r message=F, warning=F}
+ntrees1 <- gbm.perf(model4,plot.it=TRUE,method='test')
+n4 <- ntrees1
+importance <- summary.gbm1(model4,cBars=10,las=1,cex.names=0.45,plot=FALSE)
+row.names(importance) <- NULL
+importance1 <- importance
+imp4 <- importance
+write.csv(imp4,file=paste(chartsPath,"responseModelImp4.csv",sep=""),row.names=FALSE)
+kable(importance[1:10,],digits=6,caption="Variable Importance",align="c")
+
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(model4,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response')
+  tempPD <- plot.gbm(model4,n.trees=ntrees1,i.var=as.character(importance1[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance1[j,1]),"_PD4.csv",sep=""),row.names=FALSE)
+}
+
+
+interactions4 <- data.frame(rep('zz',10),0.0)
+names(interactions4) <- c('var','Hstat')
+interactions4$var <- as.character(interactions4$var)
+
+for (i in 1:10){
+  interactions4[i,1] <- as.character(importance1[i,1])
+  interactions4[i,2] <- 
+    interact.gbm(model4
+                 , data[timeIndex%in%c(10:36),c(variables,"response3","is_Holdout")]
+                 , i.var=c(as.character(importance1[i,1]),'is_Holdout')
+                 , n.trees=ntrees1)
+}
+
+interactions4 <- interactions4[order(-interactions4$Hstat),]
+interactions4 <- interactions4[interactions4$Hstat>0,]
+interactions4 <- interactions4[!(interactions4$var%in%c("is_Holdout")),]
+rownames(interactions1) <- NULL
+kable(interactions1,caption="Top Interactions",align="c")
+
+plot.gbm(model4,n.trees=ntrees1,i.var='is_Holdout',type='response')
+
+for (i in 1:nrow(interactions4)){
+  j <- (nrow(interactions4)+1)-i
+  plot.gbm(model4,n.trees=ntrees1,i.var=c(as.character(interactions4[j,1]),'is_Holdout'),type='response',main=interactions4[j,'var'])
+}
+
+data$p4 <- 0
+data$p4[timeIndex%in%c(10:36)] <- predict(model4,data[timeIndex%in%c(10:36),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+
+data$is_Holdout <- factor(0)
+data$p4_0 <- 0
+data$p4_0[timeIndex%in%c(10:36)] <- predict(model4,data[timeIndex%in%c(10:36),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- factor(1)
+data$p4_1 <- 0
+data$p4_1[timeIndex%in%c(10:36)] <- predict(model4,data[timeIndex%in%c(10:36),c(variables,"is_Holdout")],n.trees=ntrees1,type="response")
+
+data$is_Holdout <- as.numeric(data$is_Holdout)
+data$is_Holdout[timeIndex%in%c(10:33)] <- 0
+data$is_Holdout[timeIndex%in%c(34:36)] <- 1
+data$is_Holdout <- as.factor(data$is_Holdout)
+
+val <- data$p1_1[timeIndex%in%c(10:36)] - data$p1_0[timeIndex%in%c(10:36)]
+hist(val,breaks=30,col =QCOLOR[1])
+
+val <- data.frame(val=round(val,2))
+val <- sqldf("Select val, count(*) as Freq From val Group by val")
+write.csv(val,file=paste(chartsPath,"isHoldoutVal4.csv",sep=""),row.names=FALSE)
+```
+
+
+
+#Credibility weight model - trainFrame4 and testFrame4
+```{r message=F, warning=F}
+variableNames <- c()
+CramerV <- c()
+for(i in variables){
+  variableNames <- c(variableNames,i)
+  CramerV <- c(CramerV,CramersV(data[timeIndex%in%c(10:36),i],data[timeIndex%in%c(10:36),"is_Holdout"]))
+}
+CramersV_Table <- data.frame(variableNames,CramerV)
+CramersV_Table <- CramersV_Table[order(-CramerV),][1:10,]
+rownames(CramersV_Table) <- NULL
+kable(CramersV_Table,caption = "CramersV Table",align="c")
+write.csv(CramersV_Table,file=paste(chartsPath,"CramersV_Table4.csv",sep=""),row.names=FALSE)
+```
+
+```{r message=F, warning=F}
+data$is_Holdout1 <- as.numeric(as.character(data$is_Holdout))
+modelCred4 <- gbm(  
+  formula = is_Holdout1~.
+  , distribution ='bernoulli'
+  , data = data[timeIndex%in%c(10:36),c(variables1,"is_Holdout1")]
+  , var.monotone = NULL
+  , n.trees = 600
+  , interaction.depth = 7
+  , n.minobsinnode = 10
+  , shrinkage = 0.05
+  , bag.fraction = 0.5
+  , train.fraction = 0.8
+  , cv.folds = 0
+  , verbose = FALSE
+)
+
+
+importance <- summary.gbm1(modelCred4,cBars=10,las=1,cex.names=0.45,plot=TRUE)
+row.names(importance) <- NULL
+kable(importance[1:10,],digits=6,caption="Variable Importance",align="c")
+ntrees1 <- gbm.perf(modelCred4,plot.it=TRUE,method='test')
+write.csv(importance,file=paste(chartsPath,"credModelImp4.csv",sep=""),row.names=FALSE)
+
+
+for (i in 1:5){
+  j <- 6-i
+  plot.gbm(modelCred4,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response')
+  tempPD <- plot.gbm(modelCred4,n.trees=ntrees1,i.var=as.character(importance[j,1]),type='response',return.grid=TRUE)
+  rownames(tempPD) <- NULL
+  write.csv(tempPD,file=paste(chartsPath,as.character(importance[j,1]),"_PD_Cred4.csv",sep=""),row.names=FALSE)
+}
+
+data$credProb4 <- 0
+data$credProb4[timeIndex%in%c(10:36)] <- predict(modelCred4
+                                                     ,data[timeIndex%in%c(10:36)
+                                                               ,c(variables1)]
+                                                     ,n.trees=ntrees1
+                                                     ,type="response")
+
+base_wt <- 0.4
+data$credWt4 <- 0
+data$credWt4[timeIndex%in%c(10:36)] <- linear.scale(data$credProb4[timeIndex%in%c(10:36)],0.2,0.8)
+
+data$p4_hat[timeIndex%in%c(10:36)] <- data$p4_0[timeIndex%in%c(10:36)]*(1-data$credWt4[timeIndex%in%c(10:36)]) +
+  data$p4_1[timeIndex%in%c(10:36)]*(data$credWt4[timeIndex%in%c(10:36)])
+
+
+hist(data$credProb4[timeIndex%in%c(10:36)],col =QCOLOR[1])
+hist(data$credProb4[timeIndex%in%c(10:33)],col =QCOLOR[1])
+hist(data$credProb4[timeIndex%in%c(34:36)],col =QCOLOR[1])
+
+hist(data$credWt4[timeIndex%in%c(10:36)],col =QCOLOR[1])
+hist(data$credWt4[timeIndex%in%c(10:33)],col =QCOLOR[1])
+hist(data$credWt4[timeIndex%in%c(34:36)],col =QCOLOR[1])
+
+### GAINS - BASE SET ###
+Gains(data$response4[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)]
+      ,title='Gains Curve - Iter4 - Train',colour='blue', newplot=1, ltype=2)
+Gains(data$response4[timeIndex%in%c(10:33)],data$p4_1[timeIndex%in%c(10:33)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response4[timeIndex%in%c(10:33)],data$p4_0[timeIndex%in%c(10:33)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+
+### GAINS - HOLDOUT ###
+Gains(data$response4[timeIndex%in%c(34:36)],data$p4_hat[timeIndex%in%c(34:36)]
+      ,title='Gains Curve - Iter4 - Holdout',colour='blue', newplot=1, ltype=2)
+Gains(data$response4[timeIndex%in%c(34:36)],data$p4_1[timeIndex%in%c(34:36)]
+      ,colour='red', newplot=0, ltype=1)
+Gains(data$response4[timeIndex%in%c(34:36)],data$p4_0[timeIndex%in%c(34:36)]
+      ,colour='green', newplot=0, ltype=1)
+legend(70, 0.4, 
+       legend=c("y^", "y_1", "y_0"),
+       col=c("blue", "red","green"),
+       lty=c(2,1,1), cex=0.8)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+stackPrediction <- data.frame(p4_hat = data$p4_hat[timeIndex%in%c(34:36)],
+                              p4_1 = data$p4_1[timeIndex%in%c(34:36)],
+                              p4_0 = data$p4_0[timeIndex%in%c(34:36)])
+gainsDataSimulation4 <- generateGainsData(data$response4[timeIndex%in%c(34:36)],stackPrediction)
+gainsPlot(gainsDataSimulation4,"Gains Chart Holdout Iteration 4")
+write.csv(gainsDataSimulation4,file=paste(chartsPath,"gainsDataSimulation4.csv",sep=""),row.names=FALSE)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+PvO11(data$response[timeIndex%in%c(10:33)],data$p4[timeIndex%in%c(10:33)],"PvO Train")
+PvO11(data$response[timeIndex%in%c(34:36)],data$p4[timeIndex%in%c(34:36)],"PvO Test")
+PvO11(data$response[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)],"PvO Train + credWt")
+PvO11(data$response[timeIndex%in%c(34:36)],data$p4_hat[timeIndex%in%c(34:36)],"PvO Test + credWt")
+PvO11(data$response1[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)],"PvO Train + credWt + newResponse")
+
+
+CappedBinomialDeviance(data$response[timeIndex%in%c(10:33)],data$p4[timeIndex%in%c(10:33)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(34:36)],data$p4[timeIndex%in%c(34:36)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)])
+CappedBinomialDeviance(data$response[timeIndex%in%c(34:36)],data$p4_hat[timeIndex%in%c(34:36)])
+CappedBinomialDeviance(data$response1[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)])
+
+
+trainPvO4 <- generatePvOData(data$response[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)])
+testPvO4 <- generatePvOData(data$response[timeIndex%in%c(34:36)],data$p4_hat[timeIndex%in%c(34:36)])
+trainPvO4New <- generatePvOData(data$response4[timeIndex%in%c(10:33)],data$p4_hat[timeIndex%in%c(10:33)])
+
+write.csv(trainPvO4,file=paste(chartsPath,"trainPvO4.csv",sep=""),row.names=FALSE)
+write.csv(testPvO4,file=paste(chartsPath,"testPvO4.csv",sep=""),row.names=FALSE)
+write.csv(trainPvO4New,file=paste(chartsPath,"trainPvO4New.csv",sep=""),row.names=FALSE)
+```
+
+
+#Diagnostics Comparison
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+for(i in 1:4){
+  levels = as.character(imp1$var)
+  imp1$var <- factor(as.character(imp1$var),levels=levels)
+  imp2$var <- factor(as.character(imp2$var),levels=levels)
+  imp3$var <- factor(as.character(imp3$var),levels=levels)
+  imp4$var <- factor(as.character(imp4$var),levels=levels)
+  imp1$model <- "model1"
+  imp2$model <- "model2"
+  imp3$model <- "model3"
+  imp4$model <- "model4"
+}
+
+importance_agg <- rbind(imp1[1:10,],imp2[1:10,],imp3[1:10,],imp4[1:10,])
+CSVFILE <- dcast(importance_agg, model ~ var, value.var="rel.inf")
+CSVFILE[is.na(CSVFILE)] <- ""
+write.csv(CSVFILE,file=paste(chartsPath,"aggregatedImportance.csv",sep=""),row.names=FALSE)
+impPlot <- nPlot(rel.inf ~ model, group = "var", data = importance_agg, type = "multiBarChart")
+impPlot$chart(color = QCOLOR[1:length(unique(importance_agg$var))])
+impPlot$show("iframesrc", cdn = TRUE)
+```
+
+
+```{r message=F, warning=F, fig.align='center',results = 'asis', comment = NA}
+common_interaction <- c(interactions1$var,interactions2$var,interactions3$var,interactions4$var)
+common_interaction <- names(sort(table(common_interaction),decreasing = TRUE))[1:5]
+  
+for(i in common_interaction){
+temp1 <- plot.gbm(model1,n.trees=n1,i.var=c(i,'is_Holdout'),type='response',main=i,return.grid=TRUE)
+temp1$model1 <- temp1$y
+temp1$y <- NULL
+
+temp2 <- plot.gbm(model2,n.trees=n2,i.var=c(i,'is_Holdout'),type='response',main=i,return.grid=TRUE)
+temp2$model2 <- temp2$y
+temp2$y <- NULL
+
+temp3 <- plot.gbm(model3,n.trees=n3,i.var=c(i,'is_Holdout'),type='response',main=i,return.grid=TRUE)
+temp3$model3 <- temp3$y
+temp3$y <- NULL
+
+temp4 <- plot.gbm(model4,n.trees=n4,i.var=c(i,'is_Holdout'),type='response',main=i,return.grid=TRUE)
+temp4$model4 <- temp4$y
+temp4$y <- NULL
+
+temp <- cbind(temp1,temp2,temp3,temp4)
+temp <- temp[,-c(4,7,10)]
+
+if(class(data[,i])!="numeric"){
+volume <- data.frame(table(data[timeIndex%in%c(10:33),i]))
+names(volume) <- c(i,"volume")
+
+temp <- merge(temp,volume,by=i,all.x=TRUE)
+temp_0 <- subset(temp,is_Holdout==0)[,c(i,"volume","model1","model2","model3","model4")]
+temp_1 <- subset(temp,is_Holdout==1)[,c(i,"volume","model1","model2","model3","model4")]
+write.csv(temp_0,file=paste(chartsPath,i,"_Holdout_0.csv",sep=""),row.names=FALSE)
+write.csv(temp_1,file=paste(chartsPath,i,"_Holdout_1.csv",sep=""),row.names=FALSE)
+}
+
+
+if(class(data[,i])=="numeric"){
+  temp1 <- data[timeIndex%in%c(10:33),i]
+  cuts <- unique(temp[,i])
+  j <- length(cuts)
+  volume <- c()
+  for(k in 1:length(cuts)){
+  if(k==1) volume <- c(volume,length(temp1[temp1 <= cuts[k]]))
+  if(k > 1) volume <- c(volume,length(temp1[(temp1 > cuts[k-1]&temp1 <= cuts[k])]))
+  }
+  volume <- data.frame(cuts,volume)
+  names(volume) <- c(i,"volume")
+  temp <- merge(temp,volume,by=i,all.x=TRUE)
+  temp[,i] <- round(temp[,i],0)
+  temp_0 <- subset(temp,is_Holdout==0)[,c(i,"volume","model1","model2","model3","model4")]
+  temp_1 <- subset(temp,is_Holdout==1)[,c(i,"volume","model1","model2","model3","model4")]
+  write.csv(temp_0,file=paste(chartsPath,i,"_Holdout_0.csv",sep=""),row.names=FALSE)
+  write.csv(temp_1,file=paste(chartsPath,i,"_Holdout_1.csv",sep=""),row.names=FALSE)
+}
+
+plot1 <- Highcharts$new()
+plot1$title(text = i)
+plot1$xAxis(categories = temp_0[,1])
+plot1$yAxis(list(
+  list(title = list(text = 'Volume')), 
+  list(title = list(text = 'is_Holdout = 0 Probability'),opposite=TRUE
+  )))
+
+plot1$series(name = 'Volume', type='column', data=temp_0$volume, color='#6D7991', xAxis=0, yAxis=0)
+plot1$series(name = 'model1', type='spline', data=temp_0$model1, color='#DD6600', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model2', type='spline', data=temp_0$model2, color='#61AEE1', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model3', type='spline', data=temp_0$model3, color='#EE2525', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model4', type='spline', data=temp_0$model4, color='#EDCA48', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$show('iframesrc', cdn =TRUE)
+
+plot1 <- Highcharts$new()
+plot1$title(text = i)
+plot1$xAxis(categories = temp_1[,1])
+plot1$yAxis(list(
+  list(title = list(text = 'Volume')), 
+  list(title = list(text = 'is_Holdout = 1 Probability'),opposite=TRUE
+  )))
+
+plot1$series(name = 'Volume', type='column', data=temp_0$volume, color='#6D7991', xAxis=0, yAxis=0)
+plot1$series(name = 'model1', type='spline', data=temp_1$model1, color='#DD6600', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model2', type='spline', data=temp_1$model2, color='#61AEE1', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model3', type='spline', data=temp_1$model3, color='#EE2525', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$series(name = 'model4', type='spline', data=temp_1$model4, color='#EDCA48', xAxis=0, yAxis=1,dashStyle = "shortdot")
+plot1$show('iframesrc', cdn =TRUE)
+}
+```
+
+
